@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pth
+.venv/
+venv/
+
+# Datasets
+datasets/raw/
+datasets/processed/
+
+# Outputs
+outputs/
+
+# TensorBoard
+runs/
+
+# Node
+frontend/node_modules/
+
+# Environment
+.env
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
