@@ -1,4 +1,4 @@
-```python
+
 import os
 import glob
 import logging
@@ -227,4 +227,3 @@ class CloudDataset(Dataset):
             raise RuntimeError(
                 f"Dataset corruption detected."
             ) from e
-```
