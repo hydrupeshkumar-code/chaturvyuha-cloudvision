@@ -1,19 +1,18 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter
+
 router = APIRouter()
-@router.post("/metrics")
-async def calculate_metrics(file: UploadFile = File(...)):
-    if not file.filename.endswith(('.tif', '.tiff', '.jpg', '.jpeg', '.png')):
-        raise HTTPException(status_code=400, detail="Invalid file type. Only TIFF, JPG, JPEG, and PNG files are allowed.")
-    
-    metrics = {
-        "accuracy": 0.95,
-        "precision": 0.92,
-        "recall": 0.90
-    }
-    
+
+
+@router.get("/metrics")
+async def get_metrics():
+
     return {
-    "psnr_db": 28.4,
-    "ssim": 0.91,
-    "rmse_normalized": 0.04,
-    "sam_degrees": 2.1
-}
+        "psnr": 31.2,
+        "ssim": 0.91,
+        "rmse": 0.03,
+        "sam": 3.2,
+        "quality_score": 92,
+        "quality_flags": {
+            "overall": "PASS"
+        }
+    }

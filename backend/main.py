@@ -6,16 +6,17 @@ from backend.routes.reconstruct import router as reconstruct_router
 from backend.routes.metrics import router as metrics_router
 from backend.routes.report import router as report_router
 
-app = FastAPI(title="ChaturVyuha CloudVision API")
-
+app = FastAPI(
+    title="ChaturVyuha CloudVision API",
+    version="1.0.0"
+)
 
 @app.get("/health")
 def health():
     return {"status": "healthy"}
 
-
-app.include_router(upload_router)
-app.include_router(detect_router)
-app.include_router(reconstruct_router)
-app.include_router(metrics_router)
-app.include_router(report_router)
+app.include_router(upload_router, prefix="/api")
+app.include_router(detect_router, prefix="/api")
+app.include_router(reconstruct_router, prefix="/api")
+app.include_router(metrics_router, prefix="/api")
+app.include_router(report_router, prefix="/api")

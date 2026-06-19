@@ -1,14 +1,35 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, UploadFile, File
+import os
+
+from backend.services.inference_service import (
+    run_reconstruction
+)
+
 router = APIRouter()
+
+
 @router.post("/reconstruct")
-async def reconstruct_image(file: UploadFile = File(...)):
-    if not file.filename.endswith(('.tif', '.tiff', '.jpg', '.jpeg', '.png')):
-        raise HTTPException(status_code=400, detail="Invalid file type. Only TIFF, JPG, JPEG, and PNG files are allowed.")
-    
-    reconstructed_image_url = "http://example.com/reconstructed_image.jpg"
-    
+async def reconstruct_image(
+    file: UploadFile = File(...)
+):
+
+    upload_path = f"backend/uploads/{file.filename}"
+
+    with open(upload_path, "wb") as buffer:
+        buffer.write(
+            await file.read()
+        )
+
+    result = run_reconstruction(
+        image_path=upload_path,
+        mask_path="backend/outputs/masks/mask.tif",
+        output_dir="backend/outputs/reconstructed"
+    )
+
     return {
-    "file_id": "abc123",
-    "reconstructed_url": "/outputs/reconstructed/reconstructed_001.png",
-    "status": "complete"
-}
+        "reconstruction_path":
+            result["reconstruction_path"],
+        "diff_path":
+            result["diff_path"],
+        "status": "complete"
+    }
