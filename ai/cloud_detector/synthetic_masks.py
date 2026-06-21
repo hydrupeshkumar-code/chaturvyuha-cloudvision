@@ -1,301 +1,170 @@
-import os
-import glob
 import argparse
-import logging
+import json
+import random
+from pathlib import Path
+
 import numpy as np
 import rasterio
-
-from skimage.morphology import binary_dilation, disk
-from scipy.ndimage import gaussian_filter
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
-)
-
-logger = logging.getLogger(__name__)
+from scipy.ndimage import gaussian_filter, binary_closing, binary_opening
 
 
-def generate_cloud_mask(
-    h,
-    w,
-    coverage=0.35,
-    tolerance=0.03,
-    seed=None
-):
-    """
-    Generate cloud mask close to requested coverage.
-    """
-
-    if seed is not None:
-        np.random.seed(seed)
-
-    for _ in range(20):
-
-        mask = np.random.rand(h, w) < 0.02
-
-        iterations = np.random.randint(3, 7)
-
-        for _ in range(iterations):
-            radius = np.random.randint(5, 20)
-            mask = binary_dilation(mask, disk(radius))
-
-        current = mask.mean()
-
-        if abs(current - coverage) <= tolerance:
-            break
-
-    return mask.astype(np.uint8)
+def _smooth_noise(h: int, w: int, sigma: float, seed: int) -> np.ndarray:
+    rng = np.random.RandomState(seed)
+    base = rng.rand(h, w).astype(np.float32)
+    return gaussian_filter(base, sigma=sigma)
 
 
-def generate_opacity_map(mask):
-    """
-    Create semi-transparent cloud regions.
-    """
-
-    opacity = gaussian_filter(
-        mask.astype(np.float32),
-        sigma=8
-    )
-
-    opacity = opacity / (
-        opacity.max() + 1e-8
-    )
-
-    opacity = 0.3 + 0.7 * opacity
-
-    return opacity
+def perlin_clouds(h: int, w: int, seed: int) -> np.ndarray:
+    n1 = _smooth_noise(h, w, sigma=6.0, seed=seed)
+    n2 = _smooth_noise(h, w, sigma=12.0, seed=seed + 31)
+    n = 0.65 * n1 + 0.35 * n2
+    return n
 
 
-def generate_shadow_map(
-    mask,
-    shadow_strength=0.15
-):
-    """
-    Create cloud shadows.
-    """
-
-    shadow = np.roll(mask, 15, axis=0)
-    shadow = np.roll(shadow, 15, axis=1)
-
-    shadow = gaussian_filter(
-        shadow.astype(np.float32),
-        sigma=6
-    )
-
-    shadow = shadow / (
-        shadow.max() + 1e-8
-    )
-
-    shadow *= shadow_strength
-
-    return shadow
+def fractal_clouds(h: int, w: int, seed: int) -> np.ndarray:
+    layers = []
+    for i, sigma in enumerate([2.5, 5.0, 10.0, 18.0]):
+        layers.append((0.5 ** i) * _smooth_noise(h, w, sigma=sigma, seed=seed + i * 19))
+    n = np.sum(layers, axis=0)
+    return n
 
 
-def apply_clouds(
-    image,
-    mask,
-    opacity,
-    shadow
-):
-    """
-    Spectrally-aware cloud simulation.
-    """
+def blob_clouds(h: int, w: int, seed: int) -> np.ndarray:
+    rng = np.random.RandomState(seed)
+    canvas = np.zeros((h, w), dtype=np.float32)
+    n_blobs = rng.randint(12, 28)
+    yy, xx = np.mgrid[:h, :w]
+    for _ in range(n_blobs):
+        cx = rng.randint(0, w)
+        cy = rng.randint(0, h)
+        rx = rng.randint(max(6, w // 24), max(10, w // 8))
+        ry = rng.randint(max(6, h // 24), max(10, h // 8))
+        blob = np.exp(-(((xx - cx) ** 2) / (2 * rx * rx) + ((yy - cy) ** 2) / (2 * ry * ry)))
+        canvas += blob.astype(np.float32)
+    canvas = gaussian_filter(canvas, sigma=2.0)
+    return canvas
 
-    image = image.astype(np.float32)
 
-    cloudy = image.copy()
+def generate_mask(h: int, w: int, coverage: float, seed: int) -> np.ndarray:
+    # Blend required modes: Perlin + Fractal + random cloud blobs.
+    n = 0.4 * perlin_clouds(h, w, seed) + 0.4 * fractal_clouds(h, w, seed + 101) + 0.2 * blob_clouds(h, w, seed + 211)
+    n = (n - n.min()) / (n.max() - n.min() + 1e-8)
 
-    n_bands = image.shape[0]
+    thr = np.percentile(n, 100.0 * (1.0 - coverage))
+    mask = n >= thr
 
-    dtype_max = (
-        np.iinfo(image.dtype).max
-        if np.issubdtype(image.dtype, np.integer)
-        else float(np.max(image))
-    )
+    # Required smoothing + morphology.
+    mask = gaussian_filter(mask.astype(np.float32), sigma=1.4) > 0.5
+    mask = binary_closing(mask, structure=np.ones((5, 5), dtype=bool))
+    mask = binary_opening(mask, structure=np.ones((3, 3), dtype=bool))
 
-    for b in range(n_bands):
+    return np.where(mask, 255, 0).astype(np.uint8)
 
-        if b == 0:
-            cloud_reflectance = 0.85
-        elif b == 1:
-            cloud_reflectance = 0.90
+
+def synthesize_cloudy(clear_chw: np.ndarray, mask_u8: np.ndarray) -> np.ndarray:
+    mask = (mask_u8.astype(np.float32) / 255.0)[None, ...]
+    clear = clear_chw.astype(np.float32)
+    cloudy = clear.copy()
+
+    per_band_scale = np.array([0.82, 0.90, 1.00], dtype=np.float32)[:, None, None]
+    max_val = np.maximum(np.percentile(clear, 99, axis=(1, 2), keepdims=True), 1.0)
+    cloud_val = per_band_scale * max_val
+
+    # Thin cloud veil + bright cloud core.
+    veil = gaussian_filter(mask[0], sigma=5.0)[None, ...]
+    veil = 0.25 + 0.75 * (veil / (veil.max() + 1e-8))
+    cloudy = clear * (1.0 - veil * mask) + cloud_val * (veil * mask)
+
+    return cloudy.astype(clear_chw.dtype)
+
+
+def _save_png(arr_hwc: np.ndarray, out_path: Path):
+    import imageio.v2 as imageio
+
+    out = np.clip(arr_hwc * 255.0, 0, 255).astype(np.uint8)
+    imageio.imwrite(str(out_path), out)
+
+
+def _to_vis(chw: np.ndarray) -> np.ndarray:
+    hwc = np.transpose(chw, (1, 2, 0)).astype(np.float32)
+    out = np.zeros_like(hwc)
+    for c in range(hwc.shape[2]):
+        ch = hwc[:, :, c]
+        p2 = np.percentile(ch, 2)
+        p98 = np.percentile(ch, 98)
+        if p98 - p2 < 1e-8:
+            out[:, :, c] = 0
         else:
-            cloud_reflectance = 1.00
-
-        cloud_value = (
-            cloud_reflectance *
-            dtype_max
-        )
-
-        cloudy[b] = (
-            image[b] * (1.0 - opacity)
-            +
-            cloud_value * opacity
-        )
-
-        cloudy[b] = (
-            cloudy[b] *
-            (1.0 - shadow)
-        )
-
-    cloudy = np.clip(
-        cloudy,
-        0,
-        dtype_max
-    )
-
-    return cloudy.astype(image.dtype)
+            out[:, :, c] = np.clip((ch - p2) / (p98 - p2), 0, 1)
+    return out
 
 
-def process_directory(
-    clear_dir,
-    out_cloudy,
-    out_mask,
-    coverage,
-    seed,
-    shadow_strength
-):
+def generate_examples(split_manifest: Path, out_dir: Path, num_examples: int, seed: int):
+    manifest = json.loads(split_manifest.read_text(encoding="utf-8"))
+    val_pairs = manifest.get("val_pairs", [])
+    if not val_pairs:
+        raise RuntimeError("No val_pairs in split manifest")
 
-    os.makedirs(out_cloudy, exist_ok=True)
-    os.makedirs(out_mask, exist_ok=True)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    masks_dir = out_dir / "masks"
+    cloudy_dir = out_dir / "cloudy_examples"
+    masks_dir.mkdir(parents=True, exist_ok=True)
+    cloudy_dir.mkdir(parents=True, exist_ok=True)
 
-    files = sorted(
-        glob.glob(
-            os.path.join(clear_dir, "*.tif")
-        )
-    )
+    rng = random.Random(seed)
+    idxs = rng.sample(range(len(val_pairs)), min(num_examples, len(val_pairs)))
 
-    logger.info(
-        f"Found {len(files)} files."
-    )
+    coverage_levels = [0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70]
 
-    for idx, filepath in enumerate(files):
+    for i, vi in enumerate(idxs):
+        pair = val_pairs[vi]
+        p = Path(pair["target_path"])
+        if not p.exists():
+            p = Path(str(p).replace("chaturvyuha-cloudvision\\", ""))
+        with rasterio.open(p) as src:
+            clear = src.read([1, 2, 3])
+            profile = src.profile.copy()
 
-        filename = os.path.basename(
-            filepath
-        )
+        _, h, w = clear.shape
+        cov = coverage_levels[i % len(coverage_levels)]
+        mask = generate_mask(h, w, coverage=cov, seed=seed + i * 13)
+        cloudy = synthesize_cloudy(clear, mask)
 
-        with rasterio.open(filepath) as src:
+        mask_path = masks_dir / f"example_{i:03d}.tif"
+        mask_png = masks_dir / f"example_{i:03d}.png"
+        cloudy_path = cloudy_dir / f"example_{i:03d}.tif"
+        cloudy_png = cloudy_dir / f"example_{i:03d}.png"
 
-            image = src.read()
-            profile = src.profile
-
-            _, h, w = image.shape
-
-        local_seed = (
-            seed + idx
-            if seed is not None
-            else None
-        )
-
-        mask = generate_cloud_mask(
-            h,
-            w,
-            coverage=coverage,
-            seed=local_seed
-        )
-
-        opacity = generate_opacity_map(
-            mask
-        )
-
-        shadow = generate_shadow_map(
-            mask,
-            shadow_strength
-        )
-
-        cloudy = apply_clouds(
-            image,
-            mask,
-            opacity,
-            shadow
-        )
-
-        cloudy_path = os.path.join(
-            out_cloudy,
-            filename
-        )
-
-        with rasterio.open(
-            cloudy_path,
-            "w",
-            **profile
-        ) as dst:
-            dst.write(cloudy)
-
-        mask_profile = profile.copy()
-
-        mask_profile.update(
-            count=1,
-            dtype=rasterio.uint8
-        )
-
-        mask_path = os.path.join(
-            out_mask,
-            filename
-        )
-
-        with rasterio.open(
-            mask_path,
-            "w",
-            **mask_profile
-        ) as dst:
+        mprof = profile.copy()
+        mprof.update(count=1, dtype=rasterio.uint8)
+        with rasterio.open(mask_path, "w", **mprof) as dst:
             dst.write(mask, 1)
 
-        logger.info(
-            f"Generated {filename}"
-        )
+        cprof = profile.copy()
+        cprof.update(count=3)
+        with rasterio.open(cloudy_path, "w", **cprof) as dst:
+            dst.write(cloudy)
 
-    logger.info(
-        "Synthetic dataset generation complete."
+        _save_png(np.repeat((mask.astype(np.float32) / 255.0)[:, :, None], 3, axis=2), mask_png)
+        _save_png(_to_vis(cloudy), cloudy_png)
+
+
+def main():
+    p = argparse.ArgumentParser(description="Synthetic cloud mask generation with required noise modes")
+    p.add_argument("--split_manifest", default="checkpoints_nafnet/final_sharpen_finetune/split_manifest.json")
+    p.add_argument("--out_dir", default="cloud_mask_examples")
+    p.add_argument("--num_examples", type=int, default=50)
+    p.add_argument("--seed", type=int, default=42)
+    args = p.parse_args()
+
+    generate_examples(
+        split_manifest=Path(args.split_manifest),
+        out_dir=Path(args.out_dir),
+        num_examples=args.num_examples,
+        seed=args.seed,
     )
+    print(f"Generated examples at {args.out_dir}")
 
 
 if __name__ == "__main__":
-
-    parser = argparse.ArgumentParser()
-
-    parser.add_argument(
-        "--clear-dir",
-        required=True
-    )
-
-    parser.add_argument(
-        "--out-cloudy",
-        required=True
-    )
-
-    parser.add_argument(
-        "--out-mask",
-        required=True
-    )
-
-    parser.add_argument(
-        "--coverage",
-        type=float,
-        default=0.35
-    )
-
-    parser.add_argument(
-        "--shadow-strength",
-        type=float,
-        default=0.15
-    )
-
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=42
-    )
-
-    args = parser.parse_args()
-
-    process_directory(
-        args.clear_dir,
-        args.out_cloudy,
-        args.out_mask,
-        args.coverage,
-        args.seed,
-        args.shadow_strength
-    )
+    main()

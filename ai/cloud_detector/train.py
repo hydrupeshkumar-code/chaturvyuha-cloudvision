@@ -1,471 +1,249 @@
-import os
-import json
 import argparse
-import logging
+import csv
+import json
+import time
+from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn as nn
-import torch.optim as optim
-
+from torch.optim import AdamW
 from torch.utils.data import DataLoader
-from torch.cuda.amp import autocast, GradScaler
-from torch.utils.tensorboard import SummaryWriter
 
 try:
-    from .model import UNet
     from .dataset import CloudDataset
+    from .model import UNet
 except ImportError:
-    from model import UNet
     from dataset import CloudDataset
-
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
-)
-
-logger = logging.getLogger(__name__)
+    from model import UNet
 
 
 class DiceLoss(nn.Module):
-    def __init__(self, smooth=1e-6):
+    def __init__(self, smooth: float = 1e-6):
         super().__init__()
         self.smooth = smooth
 
-    def forward(self, logits, targets):
-
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         probs = torch.sigmoid(logits)
-
-        probs = probs.view(-1)
-        targets = targets.view(-1)
-
-        intersection = (
-            probs * targets
-        ).sum()
-
-        dice = (
-            2.0 * intersection + self.smooth
-        ) / (
-            probs.sum() +
-            targets.sum() +
-            self.smooth
-        )
-
+        probs = probs.reshape(-1)
+        targets = targets.reshape(-1)
+        inter = (probs * targets).sum()
+        dice = (2.0 * inter + self.smooth) / (probs.sum() + targets.sum() + self.smooth)
         return 1.0 - dice
 
 
-def validate(
-    model,
-    loader,
-    criterion_bce,
-    criterion_dice,
-    device
-):
+def compute_binary_metrics(logits: torch.Tensor, targets: torch.Tensor, threshold: float = 0.5):
+    probs = torch.sigmoid(logits)
+    preds = (probs >= threshold).to(torch.int32)
+    t = targets.to(torch.int32)
 
+    tp = int(((preds == 1) & (t == 1)).sum().item())
+    fp = int(((preds == 1) & (t == 0)).sum().item())
+    fn = int(((preds == 0) & (t == 1)).sum().item())
+    tn = int(((preds == 0) & (t == 0)).sum().item())
+
+    eps = 1e-8
+    iou = tp / (tp + fp + fn + eps)
+    precision = tp / (tp + fp + eps)
+    recall = tp / (tp + fn + eps)
+    f1 = (2 * precision * recall) / (precision + recall + eps)
+
+    return {
+        "tp": tp,
+        "fp": fp,
+        "fn": fn,
+        "tn": tn,
+        "iou": float(iou),
+        "precision": float(precision),
+        "recall": float(recall),
+        "f1": float(f1),
+    }
+
+
+def evaluate(model, loader, bce, dice, device):
     model.eval()
+    losses = []
 
-    running_loss = 0.0
-
+    tot_tp = tot_fp = tot_fn = tot_tn = 0
     with torch.no_grad():
+        for x, y in loader:
+            x = x.to(device)
+            y = y.to(device)
+            logits = model(x)
+            loss = bce(logits, y) + dice(logits, y)
+            losses.append(float(loss.item()))
 
-        for images, masks in loader:
+            m = compute_binary_metrics(logits, y)
+            tot_tp += m["tp"]
+            tot_fp += m["fp"]
+            tot_fn += m["fn"]
+            tot_tn += m["tn"]
 
-            images = images.to(device)
-            masks = masks.to(device)
+    eps = 1e-8
+    iou = tot_tp / (tot_tp + tot_fp + tot_fn + eps)
+    precision = tot_tp / (tot_tp + tot_fp + eps)
+    recall = tot_tp / (tot_tp + tot_fn + eps)
+    f1 = (2 * precision * recall) / (precision + recall + eps)
 
-            logits = model(images)
+    return {
+        "loss": float(np.mean(losses)) if losses else float("nan"),
+        "iou": float(iou),
+        "precision": float(precision),
+        "recall": float(recall),
+        "f1": float(f1),
+    }
 
-            bce = criterion_bce(
-                logits,
-                masks
-            )
 
-            dice = criterion_dice(
-                logits,
-                masks
-            )
+def run(args):
+    out_dir = Path(args.save_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-            loss = bce + dice
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    use_amp = bool(args.mixed_precision and device.startswith("cuda"))
+    scaler = torch.amp.GradScaler("cuda") if use_amp else None
 
-            running_loss += (
-                loss.item() *
-                images.size(0)
-            )
-
-    model.train()
-
-    return running_loss / max(
-        1,
-        len(loader.dataset)
+    train_ds = CloudDataset(
+        image_dir=str(Path(args.data_dir) / "train" / "images"),
+        mask_dir=str(Path(args.data_dir) / "train" / "masks"),
+        augment=True,
+    )
+    val_ds = CloudDataset(
+        image_dir=str(Path(args.data_dir) / "val" / "images"),
+        mask_dir=str(Path(args.data_dir) / "val" / "masks"),
+        augment=False,
     )
 
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=0)
 
-def main():
+    model = UNet(in_channels=3, out_channels=1).to(device)
+    bce = nn.BCEWithLogitsLoss()
+    dice = DiceLoss()
+    opt = AdamW(model.parameters(), lr=args.lr)
 
-    parser = argparse.ArgumentParser()
+    best_iou = -1.0
+    best_f1 = -1.0
 
-    parser.add_argument(
-        "--data-dir",
-        required=True
-    )
-
-    parser.add_argument(
-        "--save-dir",
-        required=True
-    )
-
-    parser.add_argument(
-        "--epochs",
-        type=int,
-        default=50
-    )
-
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=4
-    )
-
-    parser.add_argument(
-        "--lr",
-        type=float,
-        default=1e-4
-    )
-
-    parser.add_argument(
-        "--patience",
-        type=int,
-        default=8
-    )
-
-    parser.add_argument(
-        "--resume",
-        default=None
-    )
-
-    args = parser.parse_args()
-
-    os.makedirs(
-        args.save_dir,
-        exist_ok=True
-    )
-
-    with open(
-        os.path.join(
-            args.save_dir,
-            "config.json"
-        ),
-        "w"
-    ) as f:
-        json.dump(
-            vars(args),
-            f,
-            indent=4
-        )
-
-    device = torch.device(
-        "cuda"
-        if torch.cuda.is_available()
-        else "cpu"
-    )
-
-    logger.info(
-        f"Training on {device}"
-    )
-
-    scaler = (
-        GradScaler()
-        if device.type == "cuda"
-        else None
-    )
-
-    writer = SummaryWriter(
-        log_dir=os.path.join(
-            args.save_dir,
-            "logs"
-        )
-    )
-
-    model = UNet(
-        in_channels=3,
-        out_channels=1,
-        base_filters=32
-    ).to(device)
-
-    criterion_bce = (
-        nn.BCEWithLogitsLoss()
-    )
-
-    criterion_dice = DiceLoss()
-
-    optimizer = optim.AdamW(
-        model.parameters(),
-        lr=args.lr,
-        weight_decay=1e-4
-    )
-
-    scheduler = (
-        optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer,
-            mode="min",
-            factor=0.5,
-            patience=3
-        )
-    )
-
-    train_dataset = CloudDataset(
-        image_dir=os.path.join(
-            args.data_dir,
-            "train/images"
-        ),
-        mask_dir=os.path.join(
-            args.data_dir,
-            "train/masks"
-        ),
-        transform=True
-    )
-
-    val_dataset = CloudDataset(
-        image_dir=os.path.join(
-            args.data_dir,
-            "val/images"
-        ),
-        mask_dir=os.path.join(
-            args.data_dir,
-            "val/masks"
-        ),
-        transform=False
-    )
-
-    if len(train_dataset) == 0:
-        raise RuntimeError(
-            "Training dataset empty"
-        )
-
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=0,
-        pin_memory=torch.cuda.is_available()
-    )
-
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=0,
-        pin_memory=torch.cuda.is_available()
-    )
-
-    best_loss = float("inf")
-    patience_counter = 0
+    csv_path = out_dir / "training_metrics.csv"
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow([
+            "epoch",
+            "train_loss",
+            "val_loss",
+            "val_iou",
+            "val_precision",
+            "val_recall",
+            "val_f1",
+            "lr",
+            "epoch_time_sec",
+        ])
 
     history = []
 
-    start_epoch = 1
-
-    if args.resume and os.path.exists(args.resume):
-
-        checkpoint = torch.load(
-            args.resume,
-            map_location=device
-        )
-
-        model.load_state_dict(
-            checkpoint["model_state_dict"]
-        )
-
-        optimizer.load_state_dict(
-            checkpoint["optimizer_state_dict"]
-        )
-
-        scheduler.load_state_dict(
-            checkpoint["scheduler_state_dict"]
-        )
-
-        best_loss = checkpoint["best_loss"]
-
-        start_epoch = (
-            checkpoint["epoch"] + 1
-        )
-
-    for epoch in range(
-        start_epoch,
-        args.epochs + 1
-    ):
-
+    for epoch in range(1, args.epochs + 1):
+        t0 = time.time()
         model.train()
+        losses = []
 
-        epoch_loss = 0.0
+        for x, y in train_loader:
+            x = x.to(device)
+            y = y.to(device)
+            opt.zero_grad(set_to_none=True)
 
-        for images, masks in train_loader:
-
-            images = images.to(device)
-            masks = masks.to(device)
-
-            optimizer.zero_grad()
-
-            if scaler:
-
-                with autocast():
-
-                    logits = model(images)
-
-                    loss = (
-                        criterion_bce(
-                            logits,
-                            masks
-                        )
-                        +
-                        criterion_dice(
-                            logits,
-                            masks
-                        )
-                    )
-
-                scaler.scale(
-                    loss
-                ).backward()
-
-                scaler.step(
-                    optimizer
-                )
-
+            if use_amp:
+                with torch.amp.autocast(device_type="cuda"):
+                    logits = model(x)
+                    loss = bce(logits, y) + dice(logits, y)
+                scaler.scale(loss).backward()
+                scaler.step(opt)
                 scaler.update()
-
             else:
-
-                logits = model(images)
-
-                loss = (
-                    criterion_bce(
-                        logits,
-                        masks
-                    )
-                    +
-                    criterion_dice(
-                        logits,
-                        masks
-                    )
-                )
-
+                logits = model(x)
+                loss = bce(logits, y) + dice(logits, y)
                 loss.backward()
+                opt.step()
 
-                optimizer.step()
+            losses.append(float(loss.item()))
 
-            epoch_loss += loss.item()
+        train_loss = float(np.mean(losses)) if losses else float("nan")
+        val = evaluate(model, val_loader, bce, dice, device)
 
-        train_loss = (
-            epoch_loss /
-            max(
-                1,
-                len(train_loader)
-            )
-        )
+        epoch_time = float(time.time() - t0)
+        lr = float(opt.param_groups[0]["lr"])
 
-        val_loss = validate(
-            model,
-            val_loader,
-            criterion_bce,
-            criterion_dice,
-            device
-        )
-
-        scheduler.step(
-            val_loss
-        )
-
-        logger.info(
-            f"Epoch {epoch} "
-            f"| Train {train_loss:.4f} "
-            f"| Val {val_loss:.4f}"
-        )
-
-        writer.add_scalar(
-            "Loss/Train",
-            train_loss,
-            epoch
-        )
-
-        writer.add_scalar(
-            "Loss/Val",
-            val_loss,
-            epoch
-        )
-
-        history.append({
+        row = {
             "epoch": epoch,
             "train_loss": train_loss,
-            "val_loss": val_loss
-        })
+            "val_loss": val["loss"],
+            "val_iou": val["iou"],
+            "val_precision": val["precision"],
+            "val_recall": val["recall"],
+            "val_f1": val["f1"],
+            "lr": lr,
+            "epoch_time_sec": epoch_time,
+        }
+        history.append(row)
 
-        with open(
-            os.path.join(
-                args.save_dir,
-                "training_history.json"
-            ),
-            "w"
-        ) as f:
-            json.dump(
-                history,
-                f,
-                indent=4
+        with open(csv_path, "a", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(
+                [
+                    epoch,
+                    train_loss,
+                    val["loss"],
+                    val["iou"],
+                    val["precision"],
+                    val["recall"],
+                    val["f1"],
+                    lr,
+                    epoch_time,
+                ]
             )
 
-        torch.save({
-            "epoch": epoch,
-            "best_loss": best_loss,
-            "model_state_dict":
-                model.state_dict(),
-            "optimizer_state_dict":
-                optimizer.state_dict(),
-            "scheduler_state_dict":
-                scheduler.state_dict()
-        },
-        os.path.join(
-            args.save_dir,
-            "latest.pth"
-        ))
+        torch.save({"model_state_dict": model.state_dict(), "epoch": epoch}, out_dir / "last_epoch.pth")
 
-        if val_loss < best_loss:
+        if val["iou"] > best_iou:
+            best_iou = val["iou"]
+            torch.save({"model_state_dict": model.state_dict(), "epoch": epoch, "best_iou": best_iou}, out_dir / "best_iou.pth")
 
-            best_loss = val_loss
-            patience_counter = 0
+        if val["f1"] > best_f1:
+            best_f1 = val["f1"]
+            torch.save({"model_state_dict": model.state_dict(), "epoch": epoch, "best_f1": best_f1}, out_dir / "best_f1.pth")
 
-            torch.save({
-                "epoch": epoch,
-                "best_loss": best_loss,
-                "model_state_dict":
-                    model.state_dict(),
-                "optimizer_state_dict":
-                    optimizer.state_dict(),
-                "scheduler_state_dict":
-                    scheduler.state_dict()
-            },
-            os.path.join(
-                args.save_dir,
-                "best_unet.pth"
-            ))
+        print(
+            "epoch {e}: train_loss={tl:.5f} val_iou={iou:.4f} val_precision={p:.4f} val_recall={r:.4f} val_f1={f1:.4f}".format(
+                e=epoch,
+                tl=train_loss,
+                iou=val["iou"],
+                p=val["precision"],
+                r=val["recall"],
+                f1=val["f1"],
+            )
+        )
 
-        else:
+    (out_dir / "training_history.json").write_text(json.dumps(history, indent=2), encoding="utf-8")
 
-            patience_counter += 1
-
-            if patience_counter >= args.patience:
-
-                logger.info(
-                    "Early stopping triggered."
-                )
-
-                break
-
-    writer.close()
-
-    logger.info(
-        "Cloud detector training complete."
-    )
+    # Targets requested by problem statement.
+    target_report = {
+        "target_iou_gt_0_75": best_iou > 0.75,
+        "target_precision_gt_0_80": any(h["val_precision"] > 0.80 for h in history),
+        "target_recall_gt_0_80": any(h["val_recall"] > 0.80 for h in history),
+        "target_f1_gt_0_80": best_f1 > 0.80,
+        "best_iou": best_iou,
+        "best_f1": best_f1,
+        "epochs": args.epochs,
+    }
+    (out_dir / "target_check.json").write_text(json.dumps(target_report, indent=2), encoding="utf-8")
+    print("Training complete.")
 
 
 if __name__ == "__main__":
-    main()
+    p = argparse.ArgumentParser(description="Train U-Net cloud detector (BCE + Dice)")
+    p.add_argument("--data_dir", required=True)
+    p.add_argument("--save_dir", default="checkpoints_unet_cloud")
+    p.add_argument("--epochs", type=int, default=40)
+    p.add_argument("--batch_size", type=int, default=4)
+    p.add_argument("--lr", type=float, default=1e-4)
+    p.add_argument("--mixed_precision", action="store_true")
+    run(p.parse_args())
