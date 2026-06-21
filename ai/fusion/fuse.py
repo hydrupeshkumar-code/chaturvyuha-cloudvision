@@ -6,6 +6,24 @@ import rasterio
 
 
 def read_raster(path: Path):
+    if path.suffix.lower() in {".png", ".jpg", ".jpeg"}:
+        import imageio.v2 as imageio
+
+        img = imageio.imread(str(path)).astype(np.float32)
+        if img.ndim == 2:
+            img = np.repeat(img[:, :, None], 3, axis=2)
+        if img.shape[2] > 3:
+            img = img[:, :, :3]
+        chw = np.transpose(img, (2, 0, 1))
+        profile = {
+            "driver": "GTiff",
+            "dtype": "float32",
+            "height": chw.shape[1],
+            "width": chw.shape[2],
+            "count": chw.shape[0],
+        }
+        return chw, profile
+
     with rasterio.open(path) as src:
         arr = src.read().astype(np.float32)
         profile = src.profile.copy()
