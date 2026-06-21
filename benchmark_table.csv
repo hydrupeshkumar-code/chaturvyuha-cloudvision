@@ -1,0 +1,13 @@
+component,metric,value,notes
+NAFNet Final,PSNR,34.95,Strict curated test report
+NAFNet Final,SSIM,0.901,Strict curated test report
+NAFNet Final,SAM,4.99,Strict curated test report
+NAFNet Final,RMSE,0.0205,Strict curated test report
+U-Net Cloud Detector,IoU,0.9930,checkpoints_unet_cloud/eval_test/metrics.json
+U-Net Cloud Detector,Precision,0.9968,checkpoints_unet_cloud/eval_test/metrics.json
+U-Net Cloud Detector,Recall,0.9962,checkpoints_unet_cloud/eval_test/metrics.json
+U-Net Cloud Detector,F1,0.9965,checkpoints_unet_cloud/eval_test/metrics.json
+Pipeline,RuntimeSeconds,26.961,Measured on one benchmark scene
+Fusion Demo,AgricultureOverallFlag,FAIL,outputs/demo/agriculture/quality_flags.json
+Fusion Demo,UrbanOverallFlag,FAIL,outputs/demo/urban/quality_flags.json
+Fusion Demo,WaterbodyOverallFlag,FAIL,outputs/demo/waterbody/quality_flags.json

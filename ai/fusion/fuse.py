@@ -1,344 +1,104 @@
-import os
-import json
 import argparse
-import logging
-from typing import Tuple, Dict, Any
+from pathlib import Path
 
 import numpy as np
 import rasterio
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
-)
-logger = logging.getLogger(__name__)
+
+def read_raster(path: Path):
+    with rasterio.open(path) as src:
+        arr = src.read().astype(np.float32)
+        profile = src.profile.copy()
+    return arr, profile
 
 
-def fuse_images(
-    original_image: np.ndarray,
-    reconstructed_image: np.ndarray,
-    cloud_mask: np.ndarray,
-    alpha: float = 1.0
-) -> Tuple[np.ndarray, Dict[str, Any]]:
-    """
-    Mask-guided fusion of reconstructed pixels into original imagery.
-    """
-
-    if original_image.shape != reconstructed_image.shape:
-        raise ValueError(
-            f"Shape mismatch: "
-            f"original={original_image.shape}, "
-            f"reconstructed={reconstructed_image.shape}"
-        )
-
-    mask_2d = cloud_mask[0] if cloud_mask.ndim == 3 else cloud_mask
-
-    if mask_2d.shape != original_image.shape[1:]:
-        raise ValueError(
-            f"Mask shape mismatch: "
-            f"{mask_2d.shape} vs {original_image.shape[1:]}"
-        )
-
-    cloud_idx = mask_2d > 0
-
-    fused_image = original_image.copy()
-
-    for band in range(fused_image.shape[0]):
-        fused_image[band, cloud_idx] = (
-            alpha * reconstructed_image[band, cloud_idx]
-            + (1.0 - alpha) * original_image[band, cloud_idx]
-        )
-
-    pixel_diff = np.abs(
-        fused_image.astype(np.float32)
-        - original_image.astype(np.float32)
-    )
-
-    cloud_pixels = int(np.sum(cloud_idx))
-    total_pixels = int(mask_2d.size)
-
-    stats = {
-        "cloud_pixels": cloud_pixels,
-        "changed_pixels": cloud_pixels,
-        "cloud_percentage": round(
-            (cloud_pixels / total_pixels) * 100,
-            2
-        ),
-        "total_pixels": total_pixels,
-        "fusion_alpha": float(alpha),
-
-        # Radiometric metrics
-        "mean_change": float(pixel_diff.mean()),
-        "max_change": float(pixel_diff.max()),
-        "std_change": float(pixel_diff.std())
-    }
-
-    return fused_image, stats
-
-
-def generate_difference_map(
-    original_image: np.ndarray,
-    fused_image: np.ndarray
-) -> np.ndarray:
-    """
-    Generates normalized difference heatmap.
-    """
-
-    diff = np.abs(
-        fused_image.astype(np.float32)
-        - original_image.astype(np.float32)
-    )
-
-    diff_map = np.mean(diff, axis=0)
-
-    if diff_map.max() > 0:
-        diff_map = diff_map / diff_map.max()
-
-    diff_map = np.nan_to_num(diff_map)
-
-    return diff_map.astype(np.float32)
-
-
-def save_outputs(
-    image: np.ndarray,
-    profile: dict,
-    output_path: str,
-    is_single_channel: bool = False
-):
-    """
-    Save GeoTIFF while preserving metadata.
-    """
-
-    os.makedirs(
-        os.path.dirname(output_path),
-        exist_ok=True
-    )
-
+def save_raster(path: Path, chw: np.ndarray, profile: dict):
+    path.parent.mkdir(parents=True, exist_ok=True)
     out_profile = profile.copy()
+    out_profile.update(count=chw.shape[0], dtype=rasterio.float32)
+    with rasterio.open(path, "w", **out_profile) as dst:
+        dst.write(chw.astype(np.float32))
 
-    out_profile.update(
-        compress="lzw"
-    )
 
-    if is_single_channel:
+def save_png(path: Path, hwc01: np.ndarray):
+    import imageio.v2 as imageio
 
-        out_profile.update(
-            count=1,
-            dtype=rasterio.float32
-        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    imageio.imwrite(str(path), np.clip(hwc01 * 255.0, 0, 255).astype(np.uint8))
 
-        if image.ndim == 2:
-            image = np.expand_dims(
-                image,
-                axis=0
-            )
 
+def percentile_vis(chw: np.ndarray):
+    hwc = np.transpose(chw, (1, 2, 0)).astype(np.float32)
+    out = np.zeros_like(hwc)
+    for c in range(hwc.shape[2]):
+        ch = hwc[:, :, c]
+        p2 = np.percentile(ch, 2)
+        p98 = np.percentile(ch, 98)
+        if p98 - p2 < 1e-8:
+            out[:, :, c] = 0.0
+        else:
+            out[:, :, c] = np.clip((ch - p2) / (p98 - p2), 0.0, 1.0)
+    return out
+
+
+def fuse(original_chw: np.ndarray, reconstruction_chw: np.ndarray, mask: np.ndarray):
+    if original_chw.shape != reconstruction_chw.shape:
+        raise ValueError(f"original/reconstruction shape mismatch: {original_chw.shape} vs {reconstruction_chw.shape}")
+
+    if mask.ndim == 3:
+        mask_hw = mask[0]
     else:
+        mask_hw = mask
 
-        dtype = np.dtype(profile["dtype"])
+    if mask_hw.shape != original_chw.shape[1:]:
+        raise ValueError(f"mask shape mismatch: {mask_hw.shape} vs {original_chw.shape[1:]}")
 
-        if np.issubdtype(dtype, np.integer):
-            info = np.iinfo(dtype)
-            image = np.clip(
-                image,
-                info.min,
-                info.max
-            )
+    m = np.clip(mask_hw.astype(np.float32) / 255.0, 0.0, 1.0)
+    m = np.expand_dims(m, axis=0)
 
-        image = image.astype(dtype)
+    # Required formula: output = (mask * reconstruction) + ((1-mask) * original)
+    fused_chw = (m * reconstruction_chw) + ((1.0 - m) * original_chw)
 
-        out_profile.update(
-            count=image.shape[0],
-            dtype=dtype
-        )
+    diff = np.mean(np.abs(fused_chw - original_chw), axis=0)
+    dmin = float(np.percentile(diff, 2))
+    dmax = float(np.percentile(diff, 98))
+    if dmax - dmin < 1e-8:
+        diff_vis = np.zeros_like(diff, dtype=np.float32)
+    else:
+        diff_vis = np.clip((diff - dmin) / (dmax - dmin), 0.0, 1.0)
 
-    with rasterio.open(
-        output_path,
-        "w",
-        **out_profile
-    ) as dst:
-
-        dst.write(image)
-
-        dst.update_tags(
-            generated_by="ChaturVyuha CloudVision AI",
-            fusion_method="mask_guided_alpha_blending"
-        )
+    return fused_chw.astype(np.float32), diff_vis.astype(np.float32)
 
 
-def save_fusion_stats(
-    stats: Dict[str, Any],
-    output_json: str
-):
-    """
-    Save fusion metadata.
-    """
+def run(args):
+    orig, profile = read_raster(Path(args.original))
+    recon, _ = read_raster(Path(args.reconstruction))
+    mask, _ = read_raster(Path(args.mask))
 
-    os.makedirs(
-        os.path.dirname(output_json),
-        exist_ok=True
-    )
+    if orig.shape[0] >= 3:
+        orig = orig[:3]
+    if recon.shape[0] >= 3:
+        recon = recon[:3]
 
-    with open(output_json, "w") as f:
-        json.dump(stats, f, indent=4)
+    fused_chw, diff_vis = fuse(orig, recon, mask)
 
+    save_raster(Path(args.output_tif), fused_chw, profile)
 
-def validate_geospatial_alignment(
-    orig_meta,
-    recon_meta,
-    mask_meta
-):
-    """
-    Ensure all datasets are spatially aligned.
-    """
+    fused_vis = percentile_vis(fused_chw)
+    save_png(Path(args.output_png), fused_vis)
+    save_png(Path(args.output_diff_png), np.repeat(diff_vis[:, :, None], 3, axis=2))
 
-    if orig_meta["crs"] != recon_meta["crs"]:
-        raise ValueError(
-            "CRS mismatch between original and reconstruction."
-        )
-
-    if orig_meta["crs"] != mask_meta["crs"]:
-        raise ValueError(
-            "CRS mismatch between original and mask."
-        )
-
-    if orig_meta["transform"] != recon_meta["transform"]:
-        raise ValueError(
-            "Transform mismatch between original and reconstruction."
-        )
-
-    if orig_meta["transform"] != mask_meta["transform"]:
-        raise ValueError(
-            "Transform mismatch between original and mask."
-        )
-
-
-def main():
-
-    parser = argparse.ArgumentParser(
-        description="Fuse Cloud Detection + Pix2Pix Reconstruction"
-    )
-
-    parser.add_argument(
-        "--original",
-        required=True
-    )
-
-    parser.add_argument(
-        "--recon",
-        required=True
-    )
-
-    parser.add_argument(
-        "--mask",
-        required=True
-    )
-
-    parser.add_argument(
-        "--out-fused",
-        required=True
-    )
-
-    parser.add_argument(
-        "--out-diff",
-        required=True
-    )
-
-    parser.add_argument(
-        "--out-stats",
-        required=True
-    )
-
-    parser.add_argument(
-        "--alpha",
-        type=float,
-        default=1.0,
-        help="Fusion blending factor (0.0-1.0)"
-    )
-
-    args = parser.parse_args()
-
-    try:
-
-        with rasterio.open(args.original) as src:
-            orig_img = src.read()
-            profile = src.profile
-
-            orig_meta = {
-                "crs": src.crs,
-                "transform": src.transform
-            }
-
-        with rasterio.open(args.recon) as src:
-            recon_img = src.read()
-
-            recon_meta = {
-                "crs": src.crs,
-                "transform": src.transform
-            }
-
-        with rasterio.open(args.mask) as src:
-            mask_img = src.read()
-
-            mask_meta = {
-                "crs": src.crs,
-                "transform": src.transform
-            }
-
-        validate_geospatial_alignment(
-            orig_meta,
-            recon_meta,
-            mask_meta
-        )
-
-        if orig_img.shape != recon_img.shape:
-            raise ValueError(
-                f"Shape mismatch:\n"
-                f"Original: {orig_img.shape}\n"
-                f"Recon   : {recon_img.shape}"
-            )
-
-        fused_img, stats = fuse_images(
-            orig_img,
-            recon_img,
-            mask_img,
-            alpha=args.alpha
-        )
-
-        diff_map = generate_difference_map(
-            orig_img,
-            fused_img
-        )
-
-        save_outputs(
-            fused_img,
-            profile,
-            args.out_fused
-        )
-
-        save_outputs(
-            diff_map,
-            profile,
-            args.out_diff,
-            is_single_channel=True
-        )
-
-        save_fusion_stats(
-            stats,
-            args.out_stats
-        )
-
-        logger.info(
-            f"Fusion completed successfully:\n"
-            f"{json.dumps(stats, indent=2)}"
-        )
-
-    except Exception as e:
-        logger.exception(
-            f"Fusion failed: {str(e)}"
-        )
-        raise
+    print(f"Saved fused TIFF: {args.output_tif}")
+    print(f"Saved fused PNG: {args.output_png}")
+    print(f"Saved difference map: {args.output_diff_png}")
 
 
 if __name__ == "__main__":
-    main()
+    p = argparse.ArgumentParser(description="Fuse original + NAFNet reconstruction using cloud mask")
+    p.add_argument("--original", required=True)
+    p.add_argument("--reconstruction", required=True)
+    p.add_argument("--mask", required=True)
+    p.add_argument("--output_tif", default="fused.tif")
+    p.add_argument("--output_png", default="fused.png")
+    p.add_argument("--output_diff_png", default="difference_map.png")
+    run(p.parse_args())

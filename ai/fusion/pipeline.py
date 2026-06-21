@@ -1,420 +1,139 @@
-import os
+import argparse
 import json
-import time
-import logging
-from typing import Dict, Any, Optional
+from pathlib import Path
 
 import numpy as np
 import rasterio
 import torch
 
-try:
-    from ai.pix2pix.inference import load_generator, process_patch
-    from ai.fusion.fuse import (
-        fuse_images,
-        generate_difference_map,
-        save_outputs,
-        save_fusion_stats
-    )
-    from ai.metrics.compute import compute_all_metrics
-except ImportError:
-    from inference import load_generator, process_patch
-    from fuse import (
-        fuse_images,
-        generate_difference_map,
-        save_outputs,
-        save_fusion_stats
-    )
-    from compute import compute_all_metrics
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
-)
-
-logger = logging.getLogger(__name__)
+from ai.cloud_detector.model import UNet
+from ai.fusion.fuse import fuse, percentile_vis, save_png, save_raster
+from ai.metrics.compute import compute_all_metrics
+from ai.nafnet.dataset import normalize_image
+from ai.nafnet.model import NAFNetWrapper
 
 
-class FusionPipeline:
-    """
-    End-to-end CloudVision Fusion Pipeline
-
-    Steps:
-    1. Pix2Pix Reconstruction
-    2. Fusion
-    3. Difference Map
-    4. Metrics
-    5. Reporting
-    """
-
-    PIPELINE_VERSION = "1.0.0"
-
-    def __init__(self, model_path: str):
-
-        self.device = torch.device(
-            "cuda"
-            if torch.cuda.is_available()
-            else "cpu"
-        )
-
-        logger.info(
-            f"Loading Pix2Pix Generator on {self.device}"
-        )
-
-        self.model_path = model_path
-        self.model = load_generator(
-            model_path,
-            self.device
-        )
-
-    def validate_alignment(
-        self,
-        image_shape,
-        mask_shape,
-        image_crs,
-        mask_crs,
-        image_transform,
-        mask_transform
-    ):
-        """
-        Ensure image and mask are perfectly aligned.
-        """
-
-        if image_crs != mask_crs:
-            raise ValueError(
-                f"CRS mismatch:\n"
-                f"Image: {image_crs}\n"
-                f"Mask : {mask_crs}"
-            )
-
-        if image_transform != mask_transform:
-            raise ValueError(
-                "Spatial transform mismatch."
-            )
-
-        if image_shape[-2:] != mask_shape[-2:]:
-            raise ValueError(
-                f"Shape mismatch:\n"
-                f"Image: {image_shape}\n"
-                f"Mask : {mask_shape}"
-            )
-
-    def run(
-        self,
-        image_path: str,
-        mask_path: str,
-        output_dir: str,
-        alpha: float = 1.0,
-        reference_path: Optional[str] = None
-    ) -> Dict[str, Any]:
-
-        start_time = time.time()
-
-        os.makedirs(
-            output_dir,
-            exist_ok=True
-        )
-
-        fused_path = os.path.join(
-            output_dir,
-            "fused.tif"
-        )
-
-        recon_path = os.path.join(
-            output_dir,
-            "reconstruction.tif"
-        )
-
-        diff_path = os.path.join(
-            output_dir,
-            "diff_map.tif"
-        )
-
-        stats_path = os.path.join(
-            output_dir,
-            "fusion_stats.json"
-        )
-
-        metrics_path = os.path.join(
-            output_dir,
-            "metrics.json"
-        )
-
-        manifest_path = os.path.join(
-            output_dir,
-            "run_manifest.json"
-        )
-
+def _load_stats(stats_path: Path):
+    stats = {"p1": [0.0, 0.0, 0.0], "p99": [6000.0, 6000.0, 6000.0]}
+    if stats_path.exists():
         try:
+            j = json.loads(stats_path.read_text(encoding="utf-8"))
+            stats["p1"] = j.get("p1", stats["p1"])
+            stats["p99"] = j.get("p99", stats["p99"])
+        except Exception:
+            pass
+    return stats
 
-            logger.info(
-                f"Loading image: {image_path}"
-            )
 
-            with rasterio.open(image_path) as src:
+def _read3(path: Path):
+    with rasterio.open(path) as src:
+        arr = src.read().astype(np.float32)
+        profile = src.profile.copy()
+    if arr.shape[0] < 3:
+        raise RuntimeError(f"Expected >=3 bands in {path}")
+    return arr[:3], profile
 
-                image = src.read()
 
-                if image.shape[0] < 3:
-                    raise ValueError(
-                        "Input image must contain "
-                        "at least 3 bands."
-                    )
+def _predict_mask(unet: UNet, image_chw: np.ndarray, device: str, threshold: float = 0.5):
+    # Use robust percentile normalization.
+    nimg = np.zeros_like(image_chw, dtype=np.float32)
+    for c in range(image_chw.shape[0]):
+        ch = image_chw[c]
+        p2 = np.percentile(ch, 2)
+        p98 = np.percentile(ch, 98)
+        nimg[c] = 0 if p98 - p2 < 1e-8 else np.clip((ch - p2) / (p98 - p2), 0, 1)
 
-                image = image[:3].astype(np.float32)
+    x = torch.from_numpy(nimg).unsqueeze(0).to(device)
+    with torch.no_grad():
+        logits = unet(x)
+        probs = torch.sigmoid(logits)[0, 0].cpu().numpy()
+    mask = np.where(probs >= threshold, 255, 0).astype(np.uint8)
+    return mask
 
-                profile = src.profile
 
-                image_crs = src.crs
-                image_transform = src.transform
+def _predict_reconstruction(nafnet: NAFNetWrapper, image_chw: np.ndarray, stats: dict, device: str):
+    hwc = np.transpose(image_chw, (1, 2, 0))
+    n = normalize_image(hwc, stats["p1"], stats["p99"])
+    x = torch.from_numpy(np.transpose(n, (2, 0, 1)).astype(np.float32)).unsqueeze(0).to(device)
+    with torch.no_grad():
+        pred = nafnet(x)[0].cpu().numpy()
 
-            logger.info(
-                f"Loading mask: {mask_path}"
-            )
+    pred_norm = np.clip(np.transpose(pred, (1, 2, 0)), 0.0, 1.0)
+    pred_denorm = np.empty_like(pred_norm, dtype=np.float32)
+    for c in range(3):
+        pred_denorm[:, :, c] = pred_norm[:, :, c] * (stats["p99"][c] - stats["p1"][c]) + stats["p1"][c]
+    return np.transpose(pred_denorm, (2, 0, 1)).astype(np.float32), pred_norm
 
-            with rasterio.open(mask_path) as src:
 
-                mask = src.read()
+def run(args):
+    out_dir = Path(args.output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-                mask_crs = src.crs
-                mask_transform = src.transform
+    # Input Image
+    orig_chw, profile = _read3(Path(args.input_image))
 
-            self.validate_alignment(
-                image.shape,
-                mask.shape,
-                image_crs,
-                mask_crs,
-                image_transform,
-                mask_transform
-            )
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
-            logger.info(
-                "Running Pix2Pix reconstruction..."
-            )
+    # U-Net Detection
+    unet = UNet(in_channels=3, out_channels=1).to(device)
+    u_state = torch.load(args.unet_checkpoint, map_location=device)
+    u_state = u_state["model_state_dict"] if isinstance(u_state, dict) and "model_state_dict" in u_state else u_state
+    unet.load_state_dict(u_state, strict=False)
+    unet.eval()
 
-            reconstruction = process_patch(
-                self.model,
-                image,
-                self.device
-            )
+    mask_u8 = _predict_mask(unet, orig_chw, device=device, threshold=args.mask_threshold)
 
-            if reconstruction.shape != image.shape:
-                raise ValueError(
-                    f"Reconstruction shape mismatch:\n"
-                    f"{reconstruction.shape} vs {image.shape}"
-                )
+    # NAFNet Reconstruction (frozen production model)
+    nafnet = NAFNetWrapper(in_ch=3, out_ch=3).to(device)
+    n_state = torch.load(args.nafnet_checkpoint, map_location=device)
+    n_state = n_state["state_dict"] if isinstance(n_state, dict) and "state_dict" in n_state else n_state
+    nafnet.load_state_dict(n_state, strict=False)
+    nafnet.eval()
 
-            save_outputs(
-                reconstruction,
-                profile,
-                recon_path
-            )
+    stats = _load_stats(Path(args.stats_json))
+    recon_chw, recon_norm_hwc = _predict_reconstruction(nafnet, orig_chw, stats=stats, device=device)
 
-            logger.info(
-                f"Running fusion alpha={alpha}"
-            )
+    # Fusion Engine
+    fused_chw, diff_vis = fuse(orig_chw, recon_chw, mask_u8)
 
-            fused_image, stats = fuse_images(
-                image,
-                reconstruction,
-                mask,
-                alpha=alpha
-            )
+    # Save required outputs
+    save_png(out_dir / "original.png", percentile_vis(orig_chw))
+    save_png(out_dir / "cloud_mask.png", np.repeat((mask_u8.astype(np.float32) / 255.0)[:, :, None], 3, axis=2))
+    save_png(out_dir / "reconstruction.png", recon_norm_hwc)
+    save_png(out_dir / "fused.png", percentile_vis(fused_chw))
+    save_png(out_dir / "difference_map.png", np.repeat(diff_vis[:, :, None], 3, axis=2))
 
-            save_outputs(
-                fused_image,
-                profile,
-                fused_path
-            )
+    save_raster(out_dir / "fused.tif", fused_chw, profile)
 
-            logger.info(
-                "Generating difference map..."
-            )
+    # Metrics Engine
+    metrics = {}
+    if args.reference_clear:
+        ref_chw, _ = _read3(Path(args.reference_clear))
+        gt_mask = None
+        if args.gt_mask:
+            with rasterio.open(args.gt_mask) as src:
+                gt_mask = src.read(1)
+        metrics = compute_all_metrics(ref_chw, fused_chw, pred_mask=mask_u8, gt_mask=gt_mask)
+    else:
+        # Keep mask statistics even without reference clear.
+        metrics = compute_all_metrics(orig_chw, fused_chw, pred_mask=mask_u8, gt_mask=None)
 
-            diff_map = generate_difference_map(
-                image,
-                fused_image
-            )
+    quality = metrics.get("quality_flags", {})
 
-            save_outputs(
-                diff_map,
-                profile,
-                diff_path,
-                is_single_channel=True
-            )
+    (out_dir / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+    (out_dir / "quality_flags.json").write_text(json.dumps(quality, indent=2), encoding="utf-8")
 
-            processing_time = round(
-                time.time() - start_time,
-                2
-            )
-
-            stats["processing_time_seconds"] = processing_time
-            stats["pipeline_version"] = self.PIPELINE_VERSION
-            stats["execution_device"] = str(self.device)
-            stats["model_type"] = "Pix2Pix"
-
-            save_fusion_stats(
-                stats,
-                stats_path
-            )
-
-            metrics = {}
-
-            if reference_path:
-
-                logger.info(
-                    f"Loading reference image: "
-                    f"{reference_path}"
-                )
-
-                with rasterio.open(
-                    reference_path
-                ) as src:
-
-                    reference = src.read()
-
-                    if reference.shape[0] >= 3:
-                        reference = reference[:3]
-
-                    reference = reference.astype(
-                        np.float32
-                    )
-
-                if reference.shape != fused_image.shape:
-                    raise ValueError(
-                        "Reference image shape mismatch."
-                    )
-
-                raw_metrics = compute_all_metrics(
-                    reference,
-                    fused_image
-                )
-
-                metrics = {
-                    k: float(v)
-                    if isinstance(
-                        v,
-                        (
-                            np.integer,
-                            np.floating
-                        )
-                    )
-                    else v
-                    for k, v in raw_metrics.items()
-                }
-
-            with open(
-                metrics_path,
-                "w"
-            ) as f:
-                json.dump(
-                    metrics,
-                    f,
-                    indent=4
-                )
-
-            manifest = {
-                "pipeline_version":
-                    self.PIPELINE_VERSION,
-                "input_image":
-                    image_path,
-                "mask":
-                    mask_path,
-                "reference":
-                    reference_path,
-                "model":
-                    self.model_path,
-                "alpha":
-                    alpha,
-                "device":
-                    str(self.device),
-                "processing_time":
-                    processing_time
-            }
-
-            with open(
-                manifest_path,
-                "w"
-            ) as f:
-                json.dump(
-                    manifest,
-                    f,
-                    indent=4
-                )
-
-            logger.info(
-                "Pipeline completed successfully."
-            )
-
-            return {
-                "fused_path": fused_path,
-                "reconstruction_path": recon_path,
-                "diff_path": diff_path,
-                "stats_path": stats_path,
-                "metrics_path": metrics_path,
-                "manifest_path": manifest_path,
-                "fusion_stats": stats,
-                "metrics": metrics
-            }
-
-        except Exception as e:
-
-            logger.exception(
-                f"Pipeline failed: {str(e)}"
-            )
-
-            raise
+    print(f"Pipeline complete. Outputs at: {out_dir}")
 
 
 if __name__ == "__main__":
-
-    import argparse
-
-    parser = argparse.ArgumentParser(
-        description="Fusion Pipeline CLI"
-    )
-
-    parser.add_argument(
-        "--img",
-        required=True
-    )
-
-    parser.add_argument(
-        "--mask",
-        required=True
-    )
-
-    parser.add_argument(
-        "--model",
-        required=True
-    )
-
-    parser.add_argument(
-        "--out",
-        required=True
-    )
-
-    parser.add_argument(
-        "--alpha",
-        type=float,
-        default=1.0
-    )
-
-    parser.add_argument(
-        "--ref",
-        default=None
-    )
-
-    args = parser.parse_args()
-
-    pipeline = FusionPipeline(
-        args.model
-    )
-
-    pipeline.run(
-        image_path=args.img,
-        mask_path=args.mask,
-        output_dir=args.out,
-        alpha=args.alpha,
-        reference_path=args.ref
-    )
+    p = argparse.ArgumentParser(description="CloudVision master pipeline")
+    p.add_argument("--input_image", required=True)
+    p.add_argument("--reference_clear", default=None)
+    p.add_argument("--gt_mask", default=None)
+    p.add_argument("--output_dir", default="outputs")
+    p.add_argument("--unet_checkpoint", default="checkpoints_unet_cloud/best_iou.pth")
+    p.add_argument("--nafnet_checkpoint", default="checkpoints_nafnet/strict_curated_training/best_ssim.pth")
+    p.add_argument("--stats_json", default="tmp_stats/band_statistics.json")
+    p.add_argument("--mask_threshold", type=float, default=0.5)
+    run(p.parse_args())

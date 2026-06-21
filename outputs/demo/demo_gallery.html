@@ -1,0 +1,56 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>ChaturVyuha Demo Gallery</title>
+  <style>
+    body { font-family: Segoe UI, sans-serif; background:#f4f6f8; margin:20px; }
+    h1 { margin-bottom:6px; }
+    .grid { display:grid; grid-template-columns:1fr; gap:14px; }
+    .card { background:#fff; border:1px solid #d8d8d8; border-radius:10px; padding:12px; }
+    .row { display:grid; grid-template-columns:repeat(5, minmax(120px, 1fr)); gap:8px; }
+    img { width:100%; border:1px solid #bbb; border-radius:5px; }
+    .cap { text-align:center; font-size:12px; color:#333; margin-top:3px; }
+    .meta { font-size:12px; color:#555; margin-top:6px; }
+  </style>
+</head>
+<body>
+  <h1>ChaturVyuha CloudVision AI Demo Gallery</h1>
+  <p>Scenes: Agriculture, Urban, Waterbody</p>
+  <div class="grid">
+    <div class="card">
+      <h3>Agriculture Scene</h3>
+      <div class="row">
+        <div><img src="agriculture/original.png"><div class="cap">Original</div></div>
+        <div><img src="agriculture/cloud_mask.png"><div class="cap">Cloud Mask</div></div>
+        <div><img src="agriculture/reconstruction.png"><div class="cap">Reconstruction</div></div>
+        <div><img src="agriculture/fused.png"><div class="cap">Fused</div></div>
+        <div><img src="agriculture/difference_map.png"><div class="cap">Difference</div></div>
+      </div>
+      <div class="meta">Metrics: <a href="agriculture/metrics.json">metrics.json</a> | <a href="agriculture/comparison_report.md">comparison_report.md</a></div>
+    </div>
+    <div class="card">
+      <h3>Urban Scene</h3>
+      <div class="row">
+        <div><img src="urban/original.png"><div class="cap">Original</div></div>
+        <div><img src="urban/cloud_mask.png"><div class="cap">Cloud Mask</div></div>
+        <div><img src="urban/reconstruction.png"><div class="cap">Reconstruction</div></div>
+        <div><img src="urban/fused.png"><div class="cap">Fused</div></div>
+        <div><img src="urban/difference_map.png"><div class="cap">Difference</div></div>
+      </div>
+      <div class="meta">Metrics: <a href="urban/metrics.json">metrics.json</a> | <a href="urban/comparison_report.md">comparison_report.md</a></div>
+    </div>
+    <div class="card">
+      <h3>Waterbody Scene</h3>
+      <div class="row">
+        <div><img src="waterbody/original.png"><div class="cap">Original</div></div>
+        <div><img src="waterbody/cloud_mask.png"><div class="cap">Cloud Mask</div></div>
+        <div><img src="waterbody/reconstruction.png"><div class="cap">Reconstruction</div></div>
+        <div><img src="waterbody/fused.png"><div class="cap">Fused</div></div>
+        <div><img src="waterbody/difference_map.png"><div class="cap">Difference</div></div>
+      </div>
+      <div class="meta">Metrics: <a href="waterbody/metrics.json">metrics.json</a> | <a href="waterbody/comparison_report.md">comparison_report.md</a></div>
+    </div>
+  </div>
+</body>
+</html>
