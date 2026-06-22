@@ -1,1 +1,64 @@
-See outputs/demo/demo_gallery.html for the generated demo gallery.
+<!doctype html>
+<html>
+<head>
+	<meta charset="utf-8">
+	<title>ChaturVyuha CloudVision Demo Gallery</title>
+	<style>
+		body { font-family: Segoe UI, Arial, sans-serif; margin: 20px; background: #f7f8f5; color: #1f1f1f; }
+		h1 { margin-bottom: 8px; }
+		.meta { color: #444; margin-bottom: 14px; }
+		.scene { background: #fff; border: 1px solid #ddd; border-radius: 10px; padding: 12px; margin-bottom: 14px; }
+		.grid { display: grid; grid-template-columns: repeat(4, minmax(140px, 1fr)); gap: 8px; }
+		.cell img { width: 100%; border: 1px solid #ccc; border-radius: 6px; }
+		.cap { font-size: 12px; text-align: center; margin-top: 4px; color: #333; }
+		.links { margin-top: 8px; font-size: 12px; }
+		@media (max-width: 900px) { .grid { grid-template-columns: repeat(2, minmax(120px, 1fr)); } }
+	</style>
+</head>
+<body>
+	<h1>ChaturVyuha CloudVision Demo Gallery</h1>
+	<div class="meta">Final production model: checkpoints_nafnet/strict_curated_training/best_ssim.pth</div>
+
+	<div class="scene">
+		<h2>Agriculture Scene</h2>
+		<div class="grid">
+			<div class="cell"><img src="outputs/demo/agriculture/input.png" alt="input"><div class="cap">input.png</div></div>
+			<div class="cell"><img src="outputs/demo/agriculture/cloud_mask.png" alt="cloud mask"><div class="cap">cloud_mask.png</div></div>
+			<div class="cell"><img src="outputs/demo/agriculture/cloud_mask_confidence.png" alt="mask confidence"><div class="cap">cloud_mask_confidence.png</div></div>
+			<div class="cell"><img src="outputs/demo/agriculture/mask_overlay.png" alt="mask overlay"><div class="cap">mask_overlay.png</div></div>
+			<div class="cell"><img src="outputs/demo/agriculture/reconstruction_display.png" alt="reconstruction"><div class="cap">reconstruction_display.png</div></div>
+			<div class="cell"><img src="outputs/demo/agriculture/fused_display.png" alt="fused"><div class="cap">fused_display.png</div></div>
+			<div class="cell"><img src="outputs/demo/agriculture/comparison_display.png" alt="comparison"><div class="cap">comparison_display.png</div></div>
+		</div>
+		<div class="links">metrics: outputs/demo/agriculture/metrics.json</div>
+	</div>
+
+	<div class="scene">
+		<h2>Urban Scene</h2>
+		<div class="grid">
+			<div class="cell"><img src="outputs/demo/urban/input.png" alt="input"><div class="cap">input.png</div></div>
+			<div class="cell"><img src="outputs/demo/urban/cloud_mask.png" alt="cloud mask"><div class="cap">cloud_mask.png</div></div>
+			<div class="cell"><img src="outputs/demo/urban/cloud_mask_confidence.png" alt="mask confidence"><div class="cap">cloud_mask_confidence.png</div></div>
+			<div class="cell"><img src="outputs/demo/urban/mask_overlay.png" alt="mask overlay"><div class="cap">mask_overlay.png</div></div>
+			<div class="cell"><img src="outputs/demo/urban/reconstruction_display.png" alt="reconstruction"><div class="cap">reconstruction_display.png</div></div>
+			<div class="cell"><img src="outputs/demo/urban/fused_display.png" alt="fused"><div class="cap">fused_display.png</div></div>
+			<div class="cell"><img src="outputs/demo/urban/comparison_display.png" alt="comparison"><div class="cap">comparison_display.png</div></div>
+		</div>
+		<div class="links">metrics: outputs/demo/urban/metrics.json</div>
+	</div>
+
+	<div class="scene">
+		<h2>Waterbody Scene</h2>
+		<div class="grid">
+			<div class="cell"><img src="outputs/demo/waterbody/input.png" alt="input"><div class="cap">input.png</div></div>
+			<div class="cell"><img src="outputs/demo/waterbody/cloud_mask.png" alt="cloud mask"><div class="cap">cloud_mask.png</div></div>
+			<div class="cell"><img src="outputs/demo/waterbody/cloud_mask_confidence.png" alt="mask confidence"><div class="cap">cloud_mask_confidence.png</div></div>
+			<div class="cell"><img src="outputs/demo/waterbody/mask_overlay.png" alt="mask overlay"><div class="cap">mask_overlay.png</div></div>
+			<div class="cell"><img src="outputs/demo/waterbody/reconstruction_display.png" alt="reconstruction"><div class="cap">reconstruction_display.png</div></div>
+			<div class="cell"><img src="outputs/demo/waterbody/fused_display.png" alt="fused"><div class="cap">fused_display.png</div></div>
+			<div class="cell"><img src="outputs/demo/waterbody/comparison_display.png" alt="comparison"><div class="cap">comparison_display.png</div></div>
+		</div>
+		<div class="links">metrics: outputs/demo/waterbody/metrics.json</div>
+	</div>
+</body>
+</html>

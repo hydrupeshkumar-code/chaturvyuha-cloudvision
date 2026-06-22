@@ -2,6 +2,7 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 from skimage.metrics import structural_similarity as sk_ssim
+from scipy.ndimage import sobel
 
 
 EPS = 1e-8
@@ -39,6 +40,21 @@ def compute_sam(gt: np.ndarray, pred: np.ndarray) -> float:
     den = np.maximum(den, EPS)
     cos = np.clip(num / den, -1.0, 1.0)
     return float(np.degrees(np.mean(np.arccos(cos))))
+
+
+def compute_edge_similarity(gt: np.ndarray, pred: np.ndarray) -> float:
+    gt_hwc = _to_hwc(gt)
+    pr_hwc = _to_hwc(pred)
+    vals = []
+    for c in range(gt_hwc.shape[2]):
+        gt_edge = np.hypot(sobel(gt_hwc[:, :, c], axis=0), sobel(gt_hwc[:, :, c], axis=1))
+        pr_edge = np.hypot(sobel(pr_hwc[:, :, c], axis=0), sobel(pr_hwc[:, :, c], axis=1))
+        gt_vec = gt_edge.reshape(-1)
+        pr_vec = pr_edge.reshape(-1)
+        num = float(np.dot(gt_vec, pr_vec))
+        den = float(np.linalg.norm(gt_vec) * np.linalg.norm(pr_vec))
+        vals.append(num / max(den, EPS))
+    return float(np.mean(vals))
 
 
 def compute_mask_metrics(pred_mask: np.ndarray, gt_mask: Optional[np.ndarray] = None):
@@ -140,6 +156,7 @@ def compute_all_metrics(
         "ssim": float(compute_ssim(gt_n, pr_n)),
         "rmse": float(compute_rmse(gt_n, pr_n)),
         "sam": float(compute_sam(gt_n, pr_n)),
+        "edge_similarity": float(compute_edge_similarity(gt_n, pr_n)),
     }
 
     if pred_mask is not None:

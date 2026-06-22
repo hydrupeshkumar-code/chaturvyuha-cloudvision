@@ -1,7 +1,9 @@
-import os
+import csv
 import glob
 import logging
-from typing import Tuple
+import os
+from pathlib import Path
+from typing import Optional, Sequence, Tuple
 
 import torch
 from torch.utils.data import Dataset
@@ -28,58 +30,93 @@ class Pix2PixDataset(Dataset):
 
     def __init__(
         self,
-        cloudy_dir: str,
-        clear_dir: str,
+        cloudy_dir: str = None,
+        clear_dir: str = None,
         transform: bool = False,
-        bands: Tuple[int, ...] = (1, 2, 3)
+        bands: Tuple[int, ...] = (1, 2, 3),
+        pairs_csv: str = None,
+        root_dir: str = None,
+        indices: Optional[Sequence[int]] = None,
     ):
         self.cloudy_dir = cloudy_dir
         self.clear_dir = clear_dir
         self.transform = transform
         self.bands = bands
 
-        cloudy_files = sorted(
-            glob.glob(os.path.join(cloudy_dir, "*.tif"))
-        )
-
-        clear_files = sorted(
-            glob.glob(os.path.join(clear_dir, "*.tif"))
-        )
-
-        if len(cloudy_files) == 0:
-            raise RuntimeError(
-                f"No TIFF files found in {cloudy_dir}"
-            )
-
-        cloudy_lookup = {
-            os.path.splitext(
-                os.path.basename(p)
-            )[0]: p
-            for p in cloudy_files
-        }
-
-        clear_lookup = {
-            os.path.splitext(
-                os.path.basename(p)
-            )[0]: p
-            for p in clear_files
-        }
-
         self.samples = []
 
-        for name in cloudy_lookup:
+        if pairs_csv is not None:
+            csv_path = Path(pairs_csv)
+            if root_dir is None:
+                root_dir = csv_path.parent
+            root_path = Path(root_dir)
 
-            if name not in clear_lookup:
-                raise RuntimeError(
-                    f"Missing clear image for: {name}"
-                )
+            with csv_path.open("r", encoding="utf-8", newline="") as handle:
+                reader = csv.DictReader(handle)
+                rows = list(reader)
 
-            self.samples.append(
-                (
-                    cloudy_lookup[name],
-                    clear_lookup[name]
-                )
+            if not rows:
+                raise RuntimeError(f"No rows found in {pairs_csv}")
+
+            if not reader.fieldnames or "cloudy_path" not in reader.fieldnames or "clear_path" not in reader.fieldnames:
+                raise RuntimeError("CSV must contain cloudy_path and clear_path columns")
+
+            resolved = []
+            for row in rows:
+                cloudy_path = Path(row["cloudy_path"].strip())
+                clear_path = Path(row["clear_path"].strip())
+                cloudy_abs = cloudy_path if cloudy_path.is_absolute() else root_path / cloudy_path
+                clear_abs = clear_path if clear_path.is_absolute() else root_path / clear_path
+                resolved.append((str(cloudy_abs), str(clear_abs)))
+
+            if indices is not None:
+                resolved = [resolved[i] for i in indices]
+
+            self.samples = resolved
+        else:
+            if cloudy_dir is None or clear_dir is None:
+                raise ValueError("Either pairs_csv or cloudy_dir/clear_dir must be provided")
+
+            cloudy_files = sorted(
+                glob.glob(os.path.join(cloudy_dir, "*.tif"))
             )
+
+            clear_files = sorted(
+                glob.glob(os.path.join(clear_dir, "*.tif"))
+            )
+
+            if len(cloudy_files) == 0:
+                raise RuntimeError(
+                    f"No TIFF files found in {cloudy_dir}"
+                )
+
+            cloudy_lookup = {
+                os.path.splitext(
+                    os.path.basename(p)
+                )[0]: p
+                for p in cloudy_files
+            }
+
+            clear_lookup = {
+                os.path.splitext(
+                    os.path.basename(p)
+                )[0]: p
+                for p in clear_files
+            }
+
+            for name in cloudy_lookup:
+
+                if name not in clear_lookup:
+                    raise RuntimeError(
+                        f"Missing clear image for: {name}"
+                    )
+
+                self.samples.append(
+                    (
+                        cloudy_lookup[name],
+                        clear_lookup[name]
+                    )
+                )
 
         logger.info(
             f"Loaded {len(self.samples)} cloudy-clear pairs."

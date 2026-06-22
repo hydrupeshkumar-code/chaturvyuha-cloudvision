@@ -28,3 +28,14 @@ frontend/node_modules/
 
 # OS
 .DS_Store
+datasets/
+checkpoints_nafnet/
+checkpoints_unet_cloud/
+tmp_stats/
+*.pth
+*.pt
+*.ckpt
+*.tif
+*.tiff
+*.zip
+*.rar

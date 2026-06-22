@@ -1,0 +1,16 @@
+model: NAFNet
+epochs: 40
+batch_size: 4
+loss:
+  l1_weight: 100
+  ssim_weight: 5
+  sam_weight: 2
+optimizer: AdamW
+lr: 1e-4
+early_stop:
+  monitor: SSIM
+  patience: 5
+checkpoint:
+  save_best_ssim: true
+train_pairs: 200
+val_pairs: 50

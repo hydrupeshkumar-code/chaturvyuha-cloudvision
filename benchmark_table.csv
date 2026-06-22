@@ -1,8 +1,12 @@
 component,metric,value,notes
-NAFNet Final,PSNR,34.95,Strict curated test report
-NAFNet Final,SSIM,0.901,Strict curated test report
-NAFNet Final,SAM,4.99,Strict curated test report
-NAFNet Final,RMSE,0.0205,Strict curated test report
+NAFNet Production,PSNR,34.9493,checkpoints_nafnet/strict_curated_training/final_evaluation_report.md
+NAFNet Production,SSIM,0.9010,checkpoints_nafnet/strict_curated_training/final_evaluation_report.md
+NAFNet Production,SAM,4.9948,checkpoints_nafnet/strict_curated_training/final_evaluation_report.md
+NAFNet Production,RMSE,0.0205,checkpoints_nafnet/strict_curated_training/final_evaluation_report.md
+NAFNet 5000 Experiment,PSNR,30.8702,checkpoints_nafnet/dataset_scale_study_final_exec/experiment_5000/metrics_per_epoch.csv epoch 1
+NAFNet 5000 Experiment,SSIM,0.8307,checkpoints_nafnet/dataset_scale_study_final_exec/experiment_5000/metrics_per_epoch.csv epoch 1
+NAFNet 5000 Experiment,SAM,7.5113,checkpoints_nafnet/dataset_scale_study_final_exec/experiment_5000/metrics_per_epoch.csv epoch 1
+NAFNet 5000 Experiment,Status,REGRESSION_DETECTED,Early stop gate triggered at epoch 1
 U-Net Cloud Detector,IoU,0.9930,checkpoints_unet_cloud/eval_test/metrics.json
 U-Net Cloud Detector,Precision,0.9968,checkpoints_unet_cloud/eval_test/metrics.json
 U-Net Cloud Detector,Recall,0.9962,checkpoints_unet_cloud/eval_test/metrics.json
